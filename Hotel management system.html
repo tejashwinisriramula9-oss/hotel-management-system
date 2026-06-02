@@ -1,0 +1,657 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Hotel Management — Single File Prototype (No DB)</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#f6f8fb; --card:#ffffff; --muted:#667085; --accent:#2563eb; --success:#16a34a;
+    --danger:#ef4444; font-family:Inter,system-ui,Segoe UI,Roboto,"Helvetica Neue",Arial;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:linear-gradient(180deg,#eef2ff 0%,var(--bg) 100%);color:#0f172a}
+  .container{max-width:1100px;margin:28px auto;padding:20px}
+  header{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}
+  h1{font-size:20px;margin:0}
+  .card{background:var(--card);border-radius:12px;padding:16px;box-shadow:0 6px 18px rgba(2,6,23,0.06)}
+  .grid{display:grid;gap:12px}
+  .grid.cols-2{grid-template-columns:1fr 360px}
+  .row{display:flex;gap:12px}
+  .muted{color:var(--muted);font-size:13px}
+  .btn{background:var(--accent);color:white;border:0;padding:8px 12px;border-radius:8px;cursor:pointer}
+  .btn.ghost{background:transparent;color:var(--accent);border:1px solid rgba(37,99,235,0.12)}
+  .btn.warn{background:var(--danger)}
+  .btn.small{padding:6px 8px;font-size:13px}
+  input,select,textarea{padding:8px;border-radius:8px;border:1px solid #e6eef8;width:100%;font-size:14px}
+  nav a{margin-left:10px;color:var(--muted);text-decoration:none;font-size:14px}
+  .room{display:flex;justify-content:space-between;align-items:center;padding:10px;border-radius:10px;border:1px solid #eef2ff}
+  .badge{padding:6px 8px;border-radius:999px;background:#eef2ff;color:var(--accent);font-weight:600;font-size:12px}
+  .status-paid{color:var(--success);font-weight:600}
+  .status-pending{color:orange;font-weight:600}
+  .log{height:150px;overflow:auto;background:#081124;color:#e6f3ff;padding:10px;border-radius:8px;font-family:monospace;font-size:12px}
+  .mini{font-size:13px;color:var(--muted)}
+  .flex{display:flex;gap:8px;align-items:center}
+  .center{text-align:center}
+  .rating{color:#f59e0b}
+  footer{margin-top:18px;font-size:13px;color:var(--muted);text-align:center}
+  @media(max-width:880px){.grid.cols-2{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div>
+      <h1>Hotel Management — Packet-based Prototype</h1>
+      <div class="muted">Two roles (staff & customer) • Local-only (no DB) • Real-time via localStorage events</div>
+    </div>
+    <div>
+      <span id="who" class="muted">Not logged in</span>
+      <nav id="navlinks" style="display:inline-block"></nav>
+    </div>
+  </header>
+
+  <main class="grid cols-2">
+    <section id="mainPane" class="card">
+      <!-- Login UI or main content will be injected here -->
+    </section>
+
+    <aside class="card">
+      <h3 style="margin:0 0 8px 0">Live Packet Log</h3>
+      <div class="log" id="packetLog" aria-live="polite"></div>
+      <div style="margin-top:10px">
+        <button class="btn small" id="clearLog">Clear Log</button>
+        <button class="btn ghost small" id="dumpState">Export State</button>
+      </div>
+      <hr style="margin:12px 0">
+      <div>
+        <div class="mini">Demo users:</div>
+        <div class="muted mini">Staff: <strong>staff / staffpass</strong></div>
+        <div class="muted mini">Customer: <strong>alice / alicepass</strong></div>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="muted">This app stores data locally in <code>localStorage</code>. Open another tab with the same file to simulate multiple clients.</footer>
+</div>
+
+<script>
+/*
+  Hotel Management — Single-file prototype (no DB)
+  - State stored in localStorage under key 'hotel_state_v1'
+  - Packets broadcast via localStorage key 'hotel_packet' (other tabs receive 'storage' events)
+  - Run daily cleanup on load and every minute
+  - Packet structure mirrors classic network packet headers + payload (see sendPacket)
+*/
+
+/* ---------- Utilities ---------- */
+const STATE_KEY = 'hotel_state_v1';
+const PACKET_KEY = 'hotel_packet';
+const ME = { tabId: Math.random().toString(36).slice(2,9) };
+
+function nowISO(){ return (new Date()).toISOString(); }
+function simpleId(){ return 'pkt-' + Math.random().toString(36).slice(2,9); }
+function uid(){ return 'u-' + Math.random().toString(36).slice(2,9); }
+function parseDateYMD(s){ // "YYYY-MM-DD" -> Date
+  return new Date(s + 'T00:00:00');
+}
+function todayYMD(offsetDays=0){
+  const d = new Date(); d.setDate(d.getDate() + offsetDays);
+  return d.toISOString().slice(0,10);
+}
+
+/* ---------- Packet Bus (simulate network packets) ---------- */
+const packetLogEl = document.getElementById('packetLog');
+
+function sendPacket(packet){
+  packet.id = packet.id || simpleId();
+  packet.timestamp = packet.timestamp || nowISO();
+  // write to localStorage to broadcast; include sender tab id
+  const wrapper = { meta:{sender:ME.tabId}, packet };
+  localStorage.setItem(PACKET_KEY, JSON.stringify(wrapper));
+  // also process locally
+  processIncomingPacket(wrapper);
+}
+
+function processIncomingPacket(wrapper){
+  const { packet } = wrapper;
+  // show in UI
+  const line = `[${packet.timestamp}] ${packet.type} ← ${packet.src} → ${packet.dest} : ${JSON.stringify(packet.payload)}`;
+  const el = document.createElement('div'); el.textContent = line;
+  packetLogEl.prepend(el);
+  // keep only 200 entries
+  if(packetLogEl.children.length > 400) packetLogEl.removeChild(packetLogEl.lastChild);
+  // some packet types trigger UI state updates (handled elsewhere)
+  handlePacket(packet);
+}
+
+// listen to storage events to simulate inter-tab network
+window.addEventListener('storage', (ev)=>{
+  if(ev.key === PACKET_KEY && ev.newValue){
+    try{
+      const wrapper = JSON.parse(ev.newValue);
+      // ignore if from same tab (some browsers still emit)
+      if(wrapper.meta && wrapper.meta.sender === ME.tabId) return;
+      processIncomingPacket(wrapper);
+    }catch(e){console.warn('malformed packet event', e)}
+  }
+});
+
+/* ---------- Initial Demo Data & State Handling ---------- */
+const demoUsers = [
+  { id:'staff-1', username:'staff', password:'staffpass', role:'staff', display:'Manager' },
+  { id:'cust-1', username:'alice', password:'alicepass', role:'customer', display:'Alice' }
+];
+
+const initialState = {
+  users: demoUsers,
+  rooms: [
+    { id:1, number:'R101', type:'Single', price:60, status:'AVAILABLE' },
+    { id:2, number:'R102', type:'Double', price:90, status:'AVAILABLE' },
+    { id:3, number:'R103', type:'Single', price:70, status:'AVAILABLE' },
+    { id:4, number:'R104', type:'Suite', price:160, status:'AVAILABLE' },
+    { id:5, number:'R105', type:'Double', price:100, status:'AVAILABLE' },
+    { id:6, number:'R106', type:'Single', price:65, status:'AVAILABLE' }
+  ],
+  bookings: [
+    // { id: 'b-1', room_id:1, user_id:'cust-1', from:'2025-10-31', to:'2025-11-02', amount:120, paid:false, created_at: '...' }
+  ],
+  orders: [
+    // { id:'o-1', user_id:'cust-1', items:[{name:'Burger',qty:1,price:5}], total:5, status:'PENDING', created_at:'...' }
+  ],
+  feedback: []
+};
+
+function loadState(){
+  const raw = localStorage.getItem(STATE_KEY);
+  if(!raw) { localStorage.setItem(STATE_KEY, JSON.stringify(initialState)); return structuredClone(initialState); }
+  try{ return JSON.parse(raw); } catch(e){ console.warn('bad state JSON, resetting'); localStorage.setItem(STATE_KEY, JSON.stringify(initialState)); return structuredClone(initialState); }
+}
+
+function saveState(state){
+  localStorage.setItem(STATE_KEY, JSON.stringify(state));
+}
+
+// Convenience: get current user session (stored in memory for this tab)
+let currentUser = null; // { id, username, role, display }
+function setCurrentUser(u){ currentUser = u; document.getElementById('who').textContent = u ? `${u.display} (${u.role})` : 'Not logged in'; renderNav(); renderMain(); }
+
+/* ---------- Packet handlers that mutate state ---------- */
+function handlePacket(packet){
+  // We'll update local state based on packet types; these simulate server pushes
+  const state = loadState();
+  let dirty = false;
+
+  switch(packet.type){
+    case 'ROOM_BOOKED':
+      // add booking and mark room BOOKED
+      if(packet.payload){
+        const b = packet.payload.booking;
+        // avoid duplicate
+        if(!state.bookings.find(x=>x.id===b.id)){
+          state.bookings.push(b);
+          const room = state.rooms.find(r=>r.id===b.room_id);
+          if(room) room.status = 'BOOKED';
+          dirty = true;
+        }
+      }
+      break;
+    case 'PAYMENT_UPDATE':
+      if(packet.payload){
+        const { booking_id, paid } = packet.payload;
+        const b = state.bookings.find(x=>x.id===booking_id);
+        if(b){ b.paid = !!paid; dirty = true; }
+      }
+      break;
+    case 'ROOM_UNBOOKED':
+      if(packet.payload){
+        const { room_id } = packet.payload;
+        const room = state.rooms.find(r=>r.id===room_id);
+        if(room) room.status = 'AVAILABLE';
+        // remove bookings that had that room ended? we'll also clean expired in cleanup
+        dirty = true;
+      }
+      break;
+    case 'FOOD_ORDER':
+      if(packet.payload){
+        const ord = packet.payload.order;
+        if(!state.orders.find(x=>x.id===ord.id)){ state.orders.push(ord); dirty = true; }
+      }
+      break;
+    case 'FEEDBACK':
+      if(packet.payload){
+        const fb = packet.payload.feedback;
+        if(!state.feedback.find(x=>x.id===fb.id)){ state.feedback.push(fb); dirty = true; }
+      }
+      break;
+  }
+
+  if(dirty) saveState(state);
+  // If the local UI is currently staff, also re-render its dashboard
+  renderMain();
+}
+
+/* ---------- Business logic functions (trigger packets) ---------- */
+function bookRoom(roomId, fromDate, toDate){
+  const state = loadState();
+  const room = state.rooms.find(r=>r.id===roomId);
+  if(!room || room.status !== 'AVAILABLE') return { ok:false, msg:'Room not available' };
+  const booking = {
+    id: 'b-' + Math.random().toString(36).slice(2,9),
+    room_id: roomId,
+    user_id: currentUser.id,
+    from: fromDate,
+    to: toDate,
+    amount: calcAmount(room.price, fromDate, toDate),
+    paid: false,
+    created_at: nowISO()
+  };
+  // create packet
+  const packet = {
+    type: 'ROOM_BOOKED',
+    src: `customer:${currentUser.username}`,
+    dest: 'staff:all',
+    payload: { booking }
+  };
+  // Apply locally and broadcast
+  sendPacket(packet);
+  return { ok:true, booking };
+}
+
+function calcAmount(pricePerNight, from, to){
+  const d1 = parseDateYMD(from), d2 = parseDateYMD(to);
+  const days = Math.max(1, Math.round((d2 - d1) / (24*3600*1000)));
+  return pricePerNight * days;
+}
+
+function payBooking(bookingId){
+  const state = loadState();
+  const b = state.bookings.find(x=>x.id === bookingId);
+  if(!b) return { ok:false, msg:'Booking not found' };
+  if(b.paid) return { ok:false, msg:'Already paid' };
+  b.paid = true;
+  saveState(state);
+  const packet = { type:'PAYMENT_UPDATE', src:'customer:'+currentUser.username, dest:'staff:all', payload:{ booking_id: bookingId, paid:true } };
+  sendPacket(packet);
+  return { ok:true };
+}
+
+function placeOrder(items){
+  const state = loadState();
+  const order = { id:'o-'+Math.random().toString(36).slice(2,9), user_id: currentUser.id, items, total: items.reduce((s,i)=>s+i.price*i.qty,0), status:'PENDING', created_at: nowISO() };
+  // create packet
+  const packet = { type:'FOOD_ORDER', src:'customer:'+currentUser.username, dest:'staff:all', payload:{ order } };
+  sendPacket(packet);
+  return { ok:true, order };
+}
+
+function submitFeedback(rating, comment){
+  const state = loadState();
+  const fb = { id:'f-'+Math.random().toString(36).slice(2,9), user_id: currentUser.id, rating, comment, created_at: nowISO() };
+  const packet = { type:'FEEDBACK', src:'customer:'+currentUser.username, dest:'staff:all', payload:{ feedback: fb } };
+  sendPacket(packet);
+  return { ok:true, fb };
+}
+
+/* ---------- Automated daily cleanup (unbook expired rooms) ---------- */
+function dailyCleanup(){
+  const state = loadState();
+  const today = todayYMD();
+  let changed = false;
+  state.bookings = state.bookings.filter(b=>{
+    // If booking.to < today -> remove booking and free room
+    if(b.to < today){
+      const room = state.rooms.find(r=>r.id === b.room_id);
+      if(room) room.status = 'AVAILABLE';
+      // send packet for unbook
+      sendPacket({ type:'ROOM_UNBOOKED', src:'server', dest:'staff:all', payload:{ room_id: b.room_id } });
+      changed = true;
+      return false; // remove booking
+    }
+    return true;
+  });
+  if(changed) saveState(state);
+}
+
+// run on load and schedule every 60s (for demo)
+dailyCleanup();
+setInterval(dailyCleanup, 60*1000);
+
+/* ---------- UI Rendering ---------- */
+const mainPane = document.getElementById('mainPane');
+function renderNav(){
+  const nav = document.getElementById('navlinks');
+  nav.innerHTML = '';
+  if(!currentUser){
+    const a = document.createElement('a'); a.href='#'; a.textContent='Login'; a.onclick = (e)=>{ e.preventDefault(); renderMain(); };
+    nav.appendChild(a);
+  } else {
+    const a = document.createElement('a'); a.href='#'; a.textContent='Logout'; a.onclick = (e)=>{ e.preventDefault(); setCurrentUser(null); };
+    nav.appendChild(a);
+    if(currentUser.role === 'staff'){
+      const dash = document.createElement('a'); dash.href='#'; dash.textContent='Dashboard'; dash.onclick = (e)=>{ e.preventDefault(); renderMain(); };
+      nav.appendChild(dash);
+    } else {
+      const profile = document.createElement('a'); profile.href='#'; profile.textContent='My Bookings'; profile.onclick = (e)=>{ e.preventDefault(); renderMain(); };
+      nav.appendChild(profile);
+    }
+  }
+}
+
+function renderMain(){
+  if(!currentUser) return renderLogin();
+  if(currentUser.role === 'staff') return renderStaffDashboard();
+  return renderCustomerView();
+}
+
+/* ----- Login UI ----- */
+function renderLogin(){
+  mainPane.innerHTML = '';
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `
+    <h2>Login</h2>
+    <div class="muted mini">Use demo users or create local accounts</div>
+    <div style="margin-top:12px">
+      <label>Username<input id="u_user" placeholder="username"></label>
+    </div>
+    <div style="margin-top:8px">
+      <label>Password<input id="u_pass" placeholder="password" type="password"></label>
+    </div>
+    <div style="margin-top:12px" class="row">
+      <button class="btn" id="loginBtn">Login</button>
+      <button class="btn ghost" id="signupBtn">Create Account</button>
+    </div>
+  `;
+  mainPane.appendChild(wrap);
+
+  document.getElementById('loginBtn').onclick = ()=>{
+    const u = document.getElementById('u_user').value.trim();
+    const p = document.getElementById('u_pass').value;
+    const state = loadState();
+    const user = state.users.find(x=>x.username === u && x.password === p);
+    if(user){ setCurrentUser(user); sendPacket({ type:'HELLO', src:'client:'+u, dest:'server', payload:{ role:user.role } }); return; }
+    alert('Invalid credentials (try staff/staffpass or alice/alicepass). Or create account.');
+  };
+
+  document.getElementById('signupBtn').onclick = ()=>{
+    const u = document.getElementById('u_user').value.trim();
+    const p = document.getElementById('u_pass').value;
+    if(!u || !p){ alert('enter username+password'); return; }
+    const state = loadState();
+    if(state.users.find(x=>x.username===u)){ alert('username taken'); return; }
+    const user = { id: uid(), username:u, password:p, role:'customer', display: u };
+    state.users.push(user);
+    saveState(state);
+    alert('Account created. Logging in...');
+    setCurrentUser(user);
+    sendPacket({ type:'HELLO', src:'client:'+u, dest:'server', payload:{ role:user.role } });
+  };
+}
+
+/* ----- Customer UI ----- */
+function renderCustomerView(){
+  const state = loadState();
+  mainPane.innerHTML = '';
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <h2>Welcome, ${currentUser.display}</h2>
+      <div class="muted">Role: Customer</div>
+    </div>
+    <div class="muted mini">Browse rooms, book, order food, pay, and leave feedback. Changes update staff in real-time.</div>
+    <hr>
+    <div id="roomsList"></div>
+    <hr>
+    <div id="customerActions"></div>
+  `;
+  mainPane.appendChild(wrap);
+
+  // rooms
+  const roomsEl = document.getElementById('roomsList');
+  roomsEl.innerHTML = '<h3>Rooms</h3>';
+  state.rooms.forEach(r=>{
+    const div = document.createElement('div'); div.className='room'; div.style.marginTop='8px';
+    const left = document.createElement('div');
+    left.innerHTML = `<div><strong>${r.number}</strong> — ${r.type}</div><div class="muted mini">₹${r.price}/night</div>`;
+    const right = document.createElement('div');
+    const status = document.createElement('div');
+    status.innerHTML = `<span class="badge">${r.status}</span>`;
+    const action = document.createElement('div');
+    if(r.status === 'AVAILABLE'){
+      const btn = document.createElement('button'); btn.className='btn small'; btn.textContent='Book';
+      btn.onclick = ()=> showBookingModal(r);
+      action.appendChild(btn);
+    } else {
+      const info = document.createElement('div'); info.className='muted mini'; info.textContent='Currently booked';
+      action.appendChild(info);
+    }
+    right.appendChild(status); right.appendChild(action);
+    div.appendChild(left); div.appendChild(right);
+    roomsEl.appendChild(div);
+  });
+
+  // actions: my bookings, food, feedback
+  const act = document.getElementById('customerActions');
+  act.innerHTML = `
+    <h3 style="margin-top:14px">My Bookings</h3>
+    <div id="myBookings"></div>
+    <h3 style="margin-top:12px">Food — Order</h3>
+    <div id="foodMenu"></div>
+    <h3 style="margin-top:12px">Feedback & Rating</h3>
+    <div id="fbForm"></div>
+  `;
+
+  const myBookingsEl = document.getElementById('myBookings');
+  const myBookings = state.bookings.filter(b=>b.user_id === currentUser.id);
+  if(myBookings.length === 0) myBookingsEl.innerHTML = '<div class="muted mini">No bookings yet</div>';
+  else {
+    myBookings.forEach(b=>{
+      const r = state.rooms.find(x=>x.id === b.room_id) || {number:'?'}; 
+      const d = document.createElement('div'); d.className='room'; d.style.marginTop='8px';
+      d.innerHTML = `<div><strong>${r.number}</strong> ${b.from} → ${b.to} <div class="muted mini">Amount: ₹${b.amount}</div></div>
+                     <div class="center">${b.paid?'<div class="status-paid">PAID</div>':'<button class="btn small" data-bid="'+b.id+'">Pay</button>'}</div>`;
+      myBookingsEl.appendChild(d);
+      if(!b.paid){
+        d.querySelector('button[data-bid]').onclick = ()=>{
+          if(confirm('Pay ₹' + b.amount + ' now? (simulated)')){
+            const res = payBooking(b.id);
+            if(res.ok) alert('Payment successful'); else alert(res.msg);
+            renderMain();
+          }
+        };
+      }
+    });
+  }
+
+  // food menu
+  const menu = [
+    { id:'f1', name:'Margherita Pizza', price:8 },
+    { id:'f2', name:'Veg Burger', price:5 },
+    { id:'f3', name:'Caesar Salad', price:6 },
+    { id:'f4', name:'Masala Dosa', price:4 }
+  ];
+  const fm = document.getElementById('foodMenu');
+  fm.innerHTML = '';
+  menu.forEach(it=>{
+    const r = document.createElement('div'); r.className='row'; r.style.marginTop='8px';
+    r.innerHTML = `<div style="flex:1"><strong>${it.name}</strong><div class="muted mini">₹${it.price}</div></div><div style="width:120px"><input type="number" min="0" value="0" data-id="${it.id}" style="width:100%"></div>`;
+    fm.appendChild(r);
+  });
+  const orderBtn = document.createElement('button'); orderBtn.className='btn'; orderBtn.textContent='Place Order';
+  orderBtn.onclick = ()=>{
+    const qtys = Array.from(fm.querySelectorAll('input[type=number]')).map(inp=>({ id: inp.dataset.id, qty: Number(inp.value) })).filter(x=>x.qty>0);
+    if(qtys.length===0){ alert('Select items'); return; }
+    const items = qtys.map(q=>{ const mm = menu.find(m=>m.id===q.id); return { name:mm.name, qty:q.qty, price:mm.price }; });
+    const res = placeOrder(items);
+    if(res.ok) alert('Order placed'); else alert('Error');
+    renderMain();
+  };
+  fm.appendChild(orderBtn);
+
+  // feedback
+  const fb = document.getElementById('fbForm');
+  fb.innerHTML = `<div style="display:flex;gap:8px;align-items:center"><select id="rating"><option value="5">5 - Excellent</option><option value="4">4 - Good</option><option value="3">3 - Okay</option><option value="2">2 - Bad</option><option value="1">1 - Terrible</option></select></div>
+                  <div style="margin-top:8px"><textarea id="comment" rows="3" placeholder="Write feedback..."></textarea></div>
+                  <div style="margin-top:8px"><button class="btn" id="sendFb">Submit Feedback</button></div>`;
+  document.getElementById('sendFb').onclick = ()=>{
+    const rating = Number(document.getElementById('rating').value);
+    const comment = document.getElementById('comment').value.trim();
+    const res = submitFeedback(rating, comment);
+    alert('Thanks for feedback!');
+    renderMain();
+  };
+}
+
+function showBookingModal(room){
+  // simple prompt-based modal for demo
+  const from = prompt('Enter check-in date (YYYY-MM-DD)', todayYMD());
+  if(!from) return;
+  const to = prompt('Enter check-out date (YYYY-MM-DD)', todayYMD(1));
+  if(!to) return;
+  // basic validation
+  if(parseDateYMD(to) <= parseDateYMD(from)){ alert('Checkout must be after checkin'); return; }
+  const amt = calcAmount(room.price, from, to);
+  if(!confirm(`Book ${room.number} from ${from} to ${to} for ₹${amt}?`)) return;
+  const res = bookRoom(room.id, from, to);
+  if(res.ok){ alert('Booked — staff will be notified (simulated).'); renderMain(); } else alert(res.msg);
+}
+
+/* ----- Staff Dashboard ----- */
+function renderStaffDashboard(){
+  const state = loadState();
+  mainPane.innerHTML = '';
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <h2>Staff Dashboard</h2>
+      <div class="muted">Role: Staff — Real-time updates shown below</div>
+    </div>
+    <div class="muted mini">This dashboard receives packets from customers (simulated) via the packet bus.</div>
+    <hr>
+    <div class="grid" style="grid-template-columns:1fr 1fr;gap:12px">
+      <div class="card" id="roomsCard"><h3>Rooms</h3><div id="roomsTable"></div></div>
+      <div class="card" id="bookingsCard"><h3>Bookings</h3><div id="bookingsTable"></div></div>
+    </div>
+    <div style="margin-top:12px" class="card">
+      <h3>Orders</h3>
+      <div id="ordersTable"></div>
+    </div>
+    <div style="margin-top:12px" class="card">
+      <h3>Feedback</h3>
+      <div id="feedbackList"></div>
+    </div>
+  `;
+  mainPane.appendChild(wrap);
+
+  // rooms table
+  const roomsTable = document.getElementById('roomsTable');
+  roomsTable.innerHTML = '';
+  state.rooms.forEach(r=>{
+    const d = document.createElement('div'); d.className='room'; d.style.marginTop='8px';
+    d.innerHTML = `<div><strong>${r.number}</strong> — ${r.type} <div class="muted mini">₹${r.price}/night</div></div>
+                   <div style="text-align:right"><div>${r.status === 'AVAILABLE' ? '<span class="badge">AVAILABLE</span>' : '<span class="badge" style="background:#fff1f2;color:var(--danger)">BOOKED</span>'}</div>
+                   <div style="margin-top:6px"><button class="btn small" data-room="${r.id}">Force Unbook</button></div></div>`;
+    roomsTable.appendChild(d);
+    d.querySelector('button').onclick = ()=>{
+      if(!confirm('Force unbook '+r.number+' (simulated)?')) return;
+      // remove bookings with this room and mark available
+      const state = loadState();
+      state.bookings = state.bookings.filter(b=>b.room_id !== r.id);
+      const room = state.rooms.find(rr=>rr.id===r.id);
+      if(room) room.status = 'AVAILABLE';
+      saveState(state);
+      sendPacket({ type:'ROOM_UNBOOKED', src:'staff:'+currentUser.username, dest:'staff:all', payload:{ room_id: r.id } });
+      renderMain();
+    };
+  });
+
+  // bookings table
+  const bookingsTable = document.getElementById('bookingsTable');
+  bookingsTable.innerHTML = '';
+  if(state.bookings.length === 0) bookingsTable.innerHTML = '<div class="muted mini">No bookings</div>';
+  state.bookings.forEach(b=>{
+    const user = state.users.find(u=>u.id===b.user_id) || { username:'?' };
+    const room = state.rooms.find(r=>r.id===b.room_id) || { number:'?' };
+    const d = document.createElement('div'); d.className='room'; d.style.marginTop='8px';
+    d.innerHTML = `<div><strong>${room.number}</strong> — ${b.from} → ${b.to} <div class="muted mini">By ${user.username} • ₹${b.amount}</div></div>
+                   <div style="text-align:right">${b.paid?'<div class="status-paid">PAID</div>':'<div class="status-pending">PENDING</div>'}
+                   <div style="margin-top:6px"><button class="btn small" data-bid="${b.id}">Mark Paid</button></div></div>`;
+    bookingsTable.appendChild(d);
+    d.querySelector('button').onclick = ()=>{
+      if(confirm('Mark booking paid?')){
+        // mark paid
+        const state = loadState();
+        const bb = state.bookings.find(x=>x.id===b.id);
+        if(bb){ bb.paid = true; saveState(state); sendPacket({ type:'PAYMENT_UPDATE', src:'staff:'+currentUser.username, dest:'staff:all', payload:{ booking_id: b.id, paid:true } }); renderMain(); }
+      }
+    };
+  });
+
+  // orders
+  const ordersTable = document.getElementById('ordersTable');
+  ordersTable.innerHTML = '';
+  if(state.orders.length === 0) ordersTable.innerHTML = '<div class="muted mini">No orders</div>';
+  state.orders.forEach(o=>{
+    const user = state.users.find(u=>u.id === o.user_id) || { username:'?' };
+    const d = document.createElement('div'); d.className='room'; d.style.marginTop='8px';
+    d.innerHTML = `<div><strong>Order ${o.id}</strong> <div class="muted mini">By ${user.username} • ₹${o.total} • ${o.status}</div>
+                   <div style="margin-top:6px">${o.items.map(it=>`${it.qty}x ${it.name}`).join(', ')}</div></div>
+                   <div style="text-align:right"><button class="btn small" data-oid="${o.id}">Mark Ready</button></div>`;
+    ordersTable.appendChild(d);
+    d.querySelector('button').onclick = ()=>{
+      const state = loadState();
+      const oo = state.orders.find(x=>x.id === o.id);
+      if(oo){ oo.status = 'READY'; saveState(state); sendPacket({ type:'ORDER_UPDATE', src:'staff:'+currentUser.username, dest:'staff:all', payload:{ order_id: o.id, status:'READY' } }); renderMain(); }
+    };
+  });
+
+  // feedback
+  const fbEl = document.getElementById('feedbackList');
+  fbEl.innerHTML = '';
+  if(state.feedback.length ===0) fbEl.innerHTML = '<div class="muted mini">No feedback</div>';
+  state.feedback.slice().reverse().forEach(f=>{
+    const user = state.users.find(u=>u.id === f.user_id) || { username:'?' };
+    const d = document.createElement('div'); d.className='room'; d.style.marginTop='8px';
+    d.innerHTML = `<div><strong>${user.username}</strong> <span class="rating">★ ${'★'.repeat(f.rating-1)}</span> <div class="muted mini">${f.comment || ''}</div></div><div class="muted mini">${f.created_at.slice(0,10)}</div>`;
+    fbEl.appendChild(d);
+  });
+}
+
+/* ---------- helpers for debug actions ---------- */
+document.getElementById('clearLog').onclick = ()=> packetLogEl.innerHTML = '';
+document.getElementById('dumpState').onclick = ()=>{
+  const s = JSON.stringify(loadState(), null, 2);
+  const w = window.open(); w.document.write('<pre>'+escapeHtml(s)+'</pre>');
+};
+
+function escapeHtml(s){ return s.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'); }
+
+/* ---------- Initial setup ---------- */
+// if currentUser info stored in sessionStorage for convenience, restore
+const sess = sessionStorage.getItem('hotel_user_session');
+if(sess){ try{ setCurrentUser(JSON.parse(sess)); }catch(e){ setCurrentUser(null); } }
+else setCurrentUser(null);
+
+// track session persistently for this tab
+(function trackSessionStorage(){
+  const origSet = setCurrentUser;
+  setCurrentUser = function(u){
+    currentUser = u;
+    document.getElementById('who').textContent = u ? `${u.display} (${u.role})` : 'Not logged in';
+    if(u) sessionStorage.setItem('hotel_user_session', JSON.stringify(u)); else sessionStorage.removeItem('hotel_user_session');
+    renderNav();
+    renderMain();
+  };
+})();
+
+// When setCurrentUser is called initially above, it triggers renderMain()
+// But ensure we show login by default
+if(!currentUser) renderLogin();
+
+// announce this tab with HELLO packet for staff detection
+sendPacket({ type:'HELLO', src:'client:tab-'+ME.tabId, dest:'server', payload:{ tab:ME.tabId } });
+
+</script>
+</body>
+</html
