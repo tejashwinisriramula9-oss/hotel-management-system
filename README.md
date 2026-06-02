@@ -80,14 +80,14 @@ Customers can browse rooms, book rooms, place orders, and submit feedback.
 ## Staff Dashboard
 Staff can manage bookings, payments, food orders, and view feedback.
 
-![Staff Dashboard](./staffdashboard.png)
+![Staff Dashboard](./staff.dashboard.png)
 
 ---
 
 ## Ordering & Feedback System
 Customers can order food and submit feedback easily.
 
-![Ordering & Feedback System](./Ordering&FeedbackSystem.png)
+![Ordering & Feedback System](./OrderingFeedbackSystem.png)
 
 ---
 
